@@ -18,7 +18,7 @@ Outputs
 2) tiktok_combined.csv (manual sheet + scrape output + eval fields)
 
 Run (recommended debug)
-  python3 tiktok_parser_v2_3.py --sheet tiktok_database.csv --headless 0 --sleep 8 --limit 10 --dump-html 1
+  python3 tiktok_parser.py --sheet tiktok_database.csv --headless 0 --sleep 8 --limit 10 --dump-html 1
 
 Notes
 - The DOM badge/snippet is for finding on-page "AI-generated" (if it exists in web UI).
@@ -696,9 +696,36 @@ def main():
     else:
         combined["is_aigc"] = None
 
-    # Platform label: if IsAigc True OR DOM shows badge text
+    # Badge subtype: distinguish "Creator labeled as AI-generated" vs "Contains AI-generated media"
+    if "dom_ai_snippet" in combined.columns:
+        def _classify_aigc_badge(snippet: Any) -> str:
+            if pd.isna(snippet):
+                return "none"
+            s = str(snippet).lower()
+            if "creator labeled as ai-generated" in s:
+                return "creator_labeled"
+            # be a bit forgiving about truncation/variants
+            if (
+                "contains ai-generated media" in s
+                or "contains ai-gen" in s
+                or "contains ai generated" in s
+            ):
+                return "contains_ai"
+            return "none"
+
+        combined["aigc_badge_type"] = combined["dom_ai_snippet"].apply(_classify_aigc_badge)
+        combined["aigc_creator_labeled"] = combined["aigc_badge_type"] == "creator_labeled"
+        combined["aigc_contains_ai_media"] = combined["aigc_badge_type"] == "contains_ai"
+    else:
+        combined["aigc_badge_type"] = "none"
+        combined["aigc_creator_labeled"] = False
+        combined["aigc_contains_ai_media"] = False
+
+    # Platform-level AI label: either explicit JSON IsAigc True OR an AIGC badge is present
     combined["tiktok_labeled_aigc"] = combined.apply(
-        lambda r: True if (r.get("is_aigc") is True) else (True if str(r.get("dom_has_ai_text")).lower() == "true" else False),
+        lambda r: True
+        if (r.get("is_aigc") is True)
+        else bool(r.get("aigc_badge_type") in ("creator_labeled", "contains_ai")),
         axis=1,
     )
 
