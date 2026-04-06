@@ -1,0 +1,4 @@
+era,signal_platform,count,pct_within_era
+post_ai,False,1519,99.67
+post_ai,True,5,0.33
+pre_ai,False,1341,100.0

@@ -1,62 +1,74 @@
-#!/usr/bin/env python3
+"""
+Metadata parser for random-sample TikTok dataset.
+"""
+
+import argparse
+import datetime
 import json
 import re
+from pathlib import Path
+from typing import Any, List, Optional, Tuple
+
 import pandas as pd
-from typing import Any, Dict, List, Tuple
 
-METADATA_CSV = "metadata.csv"   # adjust path if needed
-N_SAMPLE_ROWS = 50              # how many rows to test JSON shape on
+AI_HASHTAGS: set = {
+    "aigc", "aiart", "aigenerated", "aicreated", "aiartwork",
+    "aianimation", "aivideo", "aifilm", "aiclip", "aicontentcreator",
+    "generativeai", "syntheticmedia", "artificialintelligence",
+    "ai_generated", "ai_art",
+    "soraai", "sora", "runwayml", "runway", "kling", "klingai",
+    "pika", "pikaart", "pikalabs", "heygen", "heygenai",
+    "midjourney", "stablediffusion", "dalle", "dalle3",
+    "luma", "lumaai", "dreamina", "haiper",
+    "invideo", "morphstudio", "genmo",
+    # broader creator-side AI mentions
+    "chatgpt", "openai", "aiavatar", "aiedit", "aiediting", "aitools",
+    "aitool", "aifilter", "aifilters", "deepfake", "deepfakes",
+}
+
+CAPTION_AI_REGEX = re.compile(
+    r"""
+    \b(
+        ai[- ]?generated|ai[- ]?created|ai[- ]?made|ai[- ]?art\b|ai[- ]?video|ai[- ]?animation
+      | made\s+(with|by|using)\s+ai\b|created\s+(with|by|using)\s+ai\b|generated\s+by\s+ai\b
+      | this\s+is\s+ai\b|not\s+real[,\.\s]|digitally\s+created|synthetic\s+media|aigc\b
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+POTENTIAL_AI_TEXT_REGEX = re.compile(
+    r"""
+    \b(
+        ai\b|aigc|ai[- ]?generated|ai[- ]?made|artificial\s+intelligence|synthetic
+      | chatgpt|openai|midjourney|dall[- ]?e|stable\s*diffusion|runway|kling|pika|heygen|luma
+      | deepfake|face\s*swap|text[- ]?to[- ]?video|image[- ]?to[- ]?video
+    )\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 
 
-def detect_json_columns(df: pd.DataFrame, sample_rows: int = 50) -> List[str]:
-    """
-    Heuristically find columns that look like JSON strings:
-    - first non-null value starts with '{' or '['
-    """
-    json_cols: List[str] = []
-    n = min(len(df), sample_rows)
-
-    for col in df.columns:
-        series = df[col].dropna().astype(str)
-        if series.empty:
-            continue
-        # look at first few non-empty values
-        for v in series.head(10):
-            v_str = v.strip()
-            if not v_str:
-                continue
-            if v_str[0] in "{[":
-                json_cols.append(col)
-            break  # only need first non-empty value
-    return sorted(set(json_cols))
-
-
-def try_parse_json(v: Any) -> Any:
-    """
-    Safely parse a value as JSON. Returns the parsed object or the original
-    value if it doesn't parse cleanly.
-    """
-    if pd.isna(v):
+def normalize_manual_label(x: Any) -> Optional[int]:
+    if x is None:
         return None
-    s = str(v).strip()
-    if not s:
-        return None
-    # Only attempt JSON if it looks like an object/array
-    if not (s.startswith("{") or s.startswith("[")):
-        return v
-    try:
-        return json.loads(s)
-    except Exception:
-        return v  # leave as-is if broken
+    s = str(x).strip().upper()
+    if s == "AI":
+        return 1
+    if s in ("NOT AI", "NOT_AI", "NON AI", "NON-AI", "NONAI", "NO", "0", "FALSE"):
+        return 0
+    return None
 
 
-def coerce_bool(x: Any) -> Any:
-    """
-    Normalize various boolean-ish representations to True/False/None.
-    Keeps non-bool / non-null values as-is so we don't lose information.
-    """
-    if pd.isna(x):
-        return None
+def pick_label_column(df: pd.DataFrame) -> Optional[str]:
+    preferred = ("AI/NOT AI", "AI_NOT_AI", "LABEL", "AI")
+    for c in df.columns:
+        if str(c).strip().upper() in preferred:
+            return c
+    return None
+
+
+def coerce_bool(x: Any) -> Optional[bool]:
     if isinstance(x, bool):
         return x
     if isinstance(x, (int, float)) and x in (0, 1):
@@ -65,262 +77,253 @@ def coerce_bool(x: Any) -> Any:
         s = x.strip().lower()
         if s in ("true", "1", "yes", "y"):
             return True
-        if s in ("false", "0", "no", "n"):
+        if s in ("false", "0", "no", "n", ""):
             return False
-    return x
+    return None
 
 
-# -----------------------------
-# AI-related pattern config
-# -----------------------------
-AI_KEY_PATTERNS_STRICT = [
-    r"\baigc\b",
-    r"\bis_aigc\b",
-    r"\bisaigc\b",
-    r"\bai[_-]?generated\b",
-    r"\bcontentcredentials\b",
-    r"\bcontent[_-]?credentials\b",
-    r"\bprovenance\b",
-]
-
-AI_KEY_PATTERNS_BROAD = AI_KEY_PATTERNS_STRICT + [
-    r"\bsynthetic\b",
-    r"\bwatermark\b",
-    r"\bcredential\b",
-    r"\bc2pa\b",
-    r"\bai[_-]?label\b",
-    r"\bcontent[_-]?label(s)?\b",
-    r"\bbadges?\b",
-    r"\blabels?\b",
-    r"\bsynthetic[_-]?media\b",
-]
-
-AI_KEY_REGEX_STRICT = re.compile("|".join(AI_KEY_PATTERNS_STRICT), re.IGNORECASE)
-AI_KEY_REGEX_BROAD = re.compile("|".join(AI_KEY_PATTERNS_BROAD), re.IGNORECASE)
-
-AI_VALUE_REGEX = re.compile(
-    r"(aigc|ai[-\s]?generated|synthetic|c2pa|content credentials|provenance|watermark)",
-    re.IGNORECASE,
-)
+def normalize_empty_text(x: Any) -> str:
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return ""
+    s = str(x).strip()
+    if s.lower() in {"", "nan", "none", "null"}:
+        return ""
+    if s in {'""', "''", '""""""'}:
+        return ""
+    return s
 
 
-def find_ai_kv_pairs(obj: Any, regex: re.Pattern, path: str = "") -> List[Tuple[str, Any]]:
-    """
-    Recursively find key paths in nested JSON whose *keys* match the regex.
-    Returns list of (json_path, value).
-    """
-    hits: List[Tuple[str, Any]] = []
-
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            k_str = str(k)
-            new_path = f"{path}.{k_str}" if path else k_str
-            if regex.search(k_str):
-                hits.append((new_path, v))
-            hits.extend(find_ai_kv_pairs(v, regex, new_path))
-
-    elif isinstance(obj, list):
-        for i, v in enumerate(obj):
-            hits.extend(find_ai_kv_pairs(v, regex, f"{path}[{i}]"))
-
-    return hits
+def extract_hashtags(text: str) -> List[str]:
+    if not isinstance(text, str) or not text.strip():
+        return []
+    return re.findall(r"#(\w+)", text, re.UNICODE)
 
 
-def find_ai_string_values(obj: Any, regex: re.Pattern, path: str = "") -> List[Tuple[str, str]]:
-    """
-    Recursively find key paths in nested JSON whose *values* (strings) match the regex.
-    Returns list of (json_path, matched_string).
-    """
-    hits: List[Tuple[str, str]] = []
-
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            p = f"{path}.{k}" if path else str(k)
-            hits.extend(find_ai_string_values(v, regex, p))
-    elif isinstance(obj, list):
-        for i, v in enumerate(obj):
-            hits.extend(find_ai_string_values(v, regex, f"{path}[{i}]"))
-    elif isinstance(obj, str):
-        if regex.search(obj):
-            hits.append((path, obj))
-
-    return hits
+def hashtag_ai_analysis(text: str) -> Tuple[bool, List[str]]:
+    tags = extract_hashtags(text)
+    matches = [t for t in tags if t.lower() in AI_HASHTAGS]
+    return bool(matches), matches
 
 
-def main():
-    print(f"Loading {METADATA_CSV} ...")
-    df = pd.read_csv(METADATA_CSV)
+def caption_ai_analysis(text: str) -> Tuple[bool, str]:
+    if not isinstance(text, str):
+        return False, ""
+    m = CAPTION_AI_REGEX.search(text)
+    return (True, m.group(0).strip()) if m else (False, "")
 
-    print(f"Rows: {len(df)}, Columns: {len(df.columns)}")
-    json_cols = detect_json_columns(df)
-    print("\nJSON-like columns detected:")
-    for c in json_cols:
-        print(f"  - {c}")
 
-    # Test-parse a subset of rows for those columns
-    sample = df.head(N_SAMPLE_ROWS).copy()
+def potential_ai_text_analysis(text: str) -> Tuple[bool, str]:
+    if not isinstance(text, str):
+        return False, ""
+    m = POTENTIAL_AI_TEXT_REGEX.search(text)
+    return (True, m.group(0).strip()) if m else (False, "")
 
-    parse_errors: Dict[str, int] = {c: 0 for c in json_cols}
 
-    for c in json_cols:
-        parsed_values = []
-        for v in sample[c]:
-            try:
-                parsed_values.append(try_parse_json(v))
-            except Exception:
-                parse_errors[c] += 1
-                parsed_values.append(v)
-        sample[c] = parsed_values
+def col_or_default(meta: pd.DataFrame, col: str, default: Any) -> pd.Series:
+    if col in meta.columns:
+        return meta[col]
+    return pd.Series([default] * len(meta), index=meta.index)
 
-    print("\nParse error counts (on first", N_SAMPLE_ROWS, "rows):")
-    for c in json_cols:
-        print(f"  {c}: {parse_errors[c]} errors")
 
-    # Show a couple of examples for a few key JSON fields
-    for c in ["video_volume_info", "challenges", "contents", "music"]:
-        if c in sample.columns:
-            print(f"\n=== Examples for column: {c} ===")
-            for i, val in enumerate(sample[c].head(3)):
-                print(f"Row {i}: type={type(val).__name__}")
-                print(val)
-                print("---")
+def build_parsed_df(meta: pd.DataFrame) -> pd.DataFrame:
+    desc = col_or_default(meta, "description", "").fillna("").astype(str)
+    ht_res = desc.apply(hashtag_ai_analysis)
+    cap_res = desc.apply(caption_ai_analysis)
+    broad_res = desc.apply(potential_ai_text_analysis)
 
-    # -----------------------------
-    # Discover AI-related fields
-    # -----------------------------
-    print("\n=== Discovering AI-related fields (names + JSON keys/values) ===")
+    return pd.DataFrame(
+        {
+            "video_id": col_or_default(meta, "video_id", pd.NA),
+            "author": col_or_default(meta, "author_unique_id", pd.NA),
+            "create_time": col_or_default(meta, "create_timestamp", pd.NA),
+            "description": desc,
+            "play_count": pd.to_numeric(col_or_default(meta, "stats_view_count", pd.NA), errors="coerce"),
+            "like_count": pd.to_numeric(col_or_default(meta, "stats_like_count", pd.NA), errors="coerce"),
+            "comment_count": pd.to_numeric(col_or_default(meta, "stats_comment_count", pd.NA), errors="coerce"),
+            "share_count": pd.to_numeric(col_or_default(meta, "stats_share_count", pd.NA), errors="coerce"),
+            "is_aigc": col_or_default(meta, "video_is_ai_gc", pd.NA).apply(coerce_bool),
+            "aigc_badge_type": col_or_default(meta, "ai_gc_label_type", pd.NA),
+            "ai_gc_description_parsed": col_or_default(meta, "ai_gc_description", pd.NA),
+            "hashtags": desc.apply(lambda t: ";".join(extract_hashtags(t))),
+            "hashtag_ai_signal": ht_res.apply(lambda r: r[0]),
+            "hashtag_ai_matches": ht_res.apply(lambda r: ";".join(r[1])),
+            "caption_ai_signal": cap_res.apply(lambda r: r[0]),
+            "caption_ai_match": cap_res.apply(lambda r: r[1]),
+            "potential_ai_text_signal": broad_res.apply(lambda r: r[0]),
+            "potential_ai_text_match": broad_res.apply(lambda r: r[1]),
+            "status": "ok",
+            "raw_source_used": "metadata_csv",
+        }
+    )
 
-    # 1) Column names that look AI-related
-    ai_name_cols: List[str] = []
-    for c in df.columns:
-        name = str(c)
-        name_lower = name.lower()
-        if re.search(r"(aigc|ai[_-]?gc|ai[_-]?generated|c2pa|content[_-]?credential|synthetic)", name_lower):
-            ai_name_cols.append(name)
 
-    print("\nColumns whose NAMES look AI-related:")
-    if ai_name_cols:
-        for c in ai_name_cols:
-            print(f"  - {c}")
+def build_signal_columns(df: pd.DataFrame, cutoff: datetime.datetime) -> pd.DataFrame:
+    out = df.copy()
+
+    def _platform_signal(row: pd.Series) -> bool:
+        aigc = coerce_bool(row.get("is_aigc"))
+        badge = normalize_empty_text(row.get("aigc_badge_type")).lower()
+        desc = normalize_empty_text(row.get("ai_gc_description"))
+        if aigc is True:
+            return True
+        if badge not in ("", "none", "nan", "0", "0.0"):
+            return True
+        if desc:
+            return True
+        return False
+
+    out["signal_platform"] = out.apply(_platform_signal, axis=1)
+    out["signal_creator_tag"] = out["hashtag_ai_signal"].fillna(False).astype(bool) | out["caption_ai_signal"].fillna(False).astype(bool)
+    out["signal_potential_text"] = out.get("potential_ai_text_signal", False)
+    out["signal_visual_model"] = out.get("signal_visual_model", pd.NA)
+
+    if "manual_ai" in out.columns:
+        out["signal_manual"] = out["manual_ai"].apply(normalize_manual_label).astype("Int64")
     else:
-        print("  (none found by name patterns)")
+        out["signal_manual"] = pd.NA
 
-    # 2) JSON content scan for AI-ish keys and values
-    N_SCAN_ROWS = min(len(df), 1000)
-    scan_df = df.head(N_SCAN_ROWS)
+    def _agree(row: pd.Series, a: str, b: str):
+        va, vb = row.get(a), row.get(b)
+        try:
+            if pd.isna(va) or pd.isna(vb):
+                return None
+        except (TypeError, ValueError):
+            pass
+        return bool(va) == bool(vb)
 
-    ai_key_counts_strict: Dict[str, int] = {}
-    ai_key_counts_broad: Dict[str, int] = {}
-    ai_value_counts: Dict[Tuple[str, str], int] = {}
-
-    for _, row in scan_df.iterrows():
-        for col in json_cols:
-            obj = try_parse_json(row[col])
-            if not isinstance(obj, (dict, list)):
-                continue
-
-            strict_hits = find_ai_kv_pairs(obj, AI_KEY_REGEX_STRICT)
-            broad_hits = find_ai_kv_pairs(obj, AI_KEY_REGEX_BROAD)
-            value_hits = find_ai_string_values(obj, AI_VALUE_REGEX)
-
-            for path, _ in strict_hits:
-                ai_key_counts_strict[path] = ai_key_counts_strict.get(path, 0) + 1
-            for path, _ in broad_hits:
-                ai_key_counts_broad[path] = ai_key_counts_broad.get(path, 0) + 1
-            for path, val in value_hits:
-                key = (path, str(val))
-                ai_value_counts[key] = ai_value_counts.get(key, 0) + 1
-
-    def _print_top_dict(title: str, d: Dict[Any, int], fmt) -> None:
-        print(f"\n{title}")
-        if not d:
-            print("  (no matches found)")
-            return
-        for k, v in sorted(d.items(), key=lambda kv: kv[1], reverse=True)[:30]:
-            print(" ", fmt(k, v))
-
-    _print_top_dict(
-        "AI-related JSON KEYS (strict patterns, top 30):",
-        ai_key_counts_strict,
-        lambda k, v: f"{k}  -> {v} rows",
+    out["signals_platform_vs_creator"] = out.apply(lambda r: _agree(r, "signal_platform", "signal_creator_tag"), axis=1)
+    out["signals_platform_vs_manual"] = out.apply(lambda r: _agree(r, "signal_platform", "signal_manual"), axis=1)
+    out["signals_creator_vs_manual"] = out.apply(lambda r: _agree(r, "signal_creator_tag", "signal_manual"), axis=1)
+    out["signals_agree_all"] = out.apply(lambda r: _agree(r, "signal_platform", "signal_creator_tag") if pd.notna(r.get("signal_manual")) else None, axis=1)
+    out["disclosure_gap"] = out["signal_creator_tag"].astype(bool) & ~out["signal_platform"].astype(bool)
+    out["signal_potential_ai_any"] = (
+        out["signal_platform"].astype(bool)
+        | out["signal_creator_tag"].astype(bool)
+        | out["signal_potential_text"].fillna(False).astype(bool)
     )
 
-    _print_top_dict(
-        "AI-related JSON KEYS (broad patterns, top 30):",
-        ai_key_counts_broad,
-        lambda k, v: f"{k}  -> {v} rows",
-    )
+    create_time_numeric = pd.to_numeric(out["create_time"], errors="coerce")
+    out["create_dt"] = pd.to_datetime(create_time_numeric, unit="s", utc=True, errors="coerce")
+    cutoff_aware = cutoff if cutoff.tzinfo else cutoff.replace(tzinfo=datetime.timezone.utc)
+    out["era"] = out["create_dt"].apply(lambda d: "post_ai" if pd.notna(d) and d >= cutoff_aware else "pre_ai")
 
-    _print_top_dict(
-        "AI-related JSON STRING VALUES (top 30):",
-        ai_value_counts,
-        lambda k, v: f"path={k[0]!r}, value={k[1]!r}  -> {v} rows",
-    )
+    for col in ("play_count", "like_count", "comment_count", "share_count"):
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    out["engagement_total"] = out[["play_count", "like_count", "comment_count", "share_count"]].sum(axis=1, min_count=1)
+    out["like_rate"] = (out["like_count"] / out["play_count"].replace(0, pd.NA)).round(6)
+    out["comment_rate"] = (out["comment_count"] / out["play_count"].replace(0, pd.NA)).round(6)
+    out["tiktok_labeled_aigc"] = out["signal_platform"].astype(bool)
+    return out
 
-    # -----------------------------
-    # AI-specific metadata summary
-    # -----------------------------
-    print("\n=== AI-related metadata summary ===")
 
-    if "video_is_ai_gc" in df.columns:
-        df["video_is_ai_gc_norm"] = df["video_is_ai_gc"].apply(coerce_bool)
-        ai_series = df["video_is_ai_gc_norm"]
+def load_metadata(args: argparse.Namespace) -> pd.DataFrame:
+    # Backward compatible: --sheet can still point to a single file.
+    # New behavior: use --metadata-dir to load/concat many CSVs.
+    if args.metadata_dir:
+        base = Path(args.metadata_dir)
+        csv_files = sorted(base.glob(args.pattern))
+        if not csv_files:
+            raise FileNotFoundError(f"No metadata CSV files found in '{args.metadata_dir}' with pattern '{args.pattern}'")
+        frames = []
+        for p in csv_files:
+            part = pd.read_csv(p, low_memory=False)
+            part["source_metadata_file"] = p.name
+            frames.append(part)
+        merged = pd.concat(frames, ignore_index=True)
+        print(f"Loaded {len(csv_files)} files from {args.metadata_dir} ({len(merged)} rows).")
+        return merged
 
-        total = len(df)
-        n_true = (ai_series == True).sum()
-        n_false = (ai_series == False).sum()
-        n_other = total - n_true - n_false
+    sheet_path = Path(args.sheet)
+    if sheet_path.is_dir():
+        csv_files = sorted(sheet_path.glob(args.pattern))
+        if not csv_files:
+            raise FileNotFoundError(f"No metadata CSV files found in '{args.sheet}' with pattern '{args.pattern}'")
+        frames = []
+        for p in csv_files:
+            part = pd.read_csv(p, low_memory=False)
+            part["source_metadata_file"] = p.name
+            frames.append(part)
+        merged = pd.concat(frames, ignore_index=True)
+        print(f"Loaded {len(csv_files)} files from {args.sheet} ({len(merged)} rows).")
+        return merged
 
-        pct = lambda n: (100.0 * n / total) if total else 0.0
+    return pd.read_csv(args.sheet, low_memory=False)
 
-        print(f"\nvideo_is_ai_gc present (n={total} rows)")
-        print(f"  True : {n_true} ({pct(n_true):.2f}%)")
-        print(f"  False: {n_false} ({pct(n_false):.2f}%)")
-        print(f"  Other/NA: {n_other} ({pct(n_other):.2f}%)")
 
-        # For rows TikTok marks as AI, inspect label fields
-        ai_rows = df[ai_series == True].copy()
-        if not ai_rows.empty:
-            if "ai_gc_description" in ai_rows.columns:
-                print("\nTop ai_gc_description values for AI-flagged videos:")
-                print(
-                    ai_rows["ai_gc_description"]
-                    .fillna("NA")
-                    .astype(str)
-                    .value_counts()
-                    .head(10)
-                    .to_string()
-                )
+def load_metadata_json_dir(metadata_dir: str, pattern: str) -> pd.DataFrame:
+    base = Path(metadata_dir)
+    json_files = sorted(base.glob(pattern))
+    if not json_files:
+        raise FileNotFoundError(f"No metadata JSON files found in '{metadata_dir}' with pattern '{pattern}'")
 
-            if "ai_gc_label_type" in ai_rows.columns:
-                print("\nTop ai_gc_label_type values for AI-flagged videos:")
-                print(
-                    ai_rows["ai_gc_label_type"]
-                    .fillna("NA")
-                    .astype(str)
-                    .value_counts()
-                    .head(10)
-                    .to_string()
-                )
+    rows = []
+    for p in json_files:
+        try:
+            payload = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
 
-            # Optional: basic engagement comparison
-            stats_cols = [
-                "stats_view_count",
-                "stats_like_count",
-                "stats_comment_count",
-                "stats_share_count",
-            ]
-            present_stats = [c for c in stats_cols if c in df.columns]
-            if present_stats:
-                print("\nMean engagement stats by AI flag (only numeric rows):")
-                # Coerce to numeric for summary
-                tmp = df.copy()
-                for c in present_stats:
-                    tmp[c] = pd.to_numeric(tmp[c], errors="coerce")
-                grouped = tmp.groupby("video_is_ai_gc_norm")[present_stats].mean(numeric_only=True)
-                print(grouped.to_string())
+        item = (
+            payload.get("itemInfo", {})
+            .get("itemStruct", {})
+        )
+        author = item.get("author", {}) if isinstance(item.get("author"), dict) else {}
+        stats = item.get("stats", {}) if isinstance(item.get("stats"), dict) else {}
+        stats_v2 = item.get("statsV2", {}) if isinstance(item.get("statsV2"), dict) else {}
+        creator_ai_comment = item.get("creatorAIComment", {}) if isinstance(item.get("creatorAIComment"), dict) else {}
+
+        rows.append(
+            {
+                "video_id": item.get("id"),
+                "description": item.get("desc", ""),
+                "create_timestamp": item.get("createTime"),
+                "author_unique_id": author.get("uniqueId"),
+                "stats_view_count": stats.get("playCount", stats_v2.get("playCount")),
+                "stats_like_count": stats.get("diggCount", stats_v2.get("diggCount")),
+                "stats_comment_count": stats.get("commentCount", stats_v2.get("commentCount")),
+                "stats_share_count": stats.get("shareCount", stats_v2.get("shareCount")),
+                "video_is_ai_gc": item.get("IsAigc"),
+                "ai_gc_label_type": item.get("AIGCLabelType"),
+                "ai_gc_description": item.get("AIGCDescription"),
+                "creator_ai_topic": creator_ai_comment.get("hasAITopic"),
+                "source_metadata_file": p.name,
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    print(f"Loaded {len(df)} rows from {len(json_files)} JSON files in {metadata_dir}.")
+    return df
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--sheet", default="metadata.csv")
+    ap.add_argument("--metadata-dir", default=None, help="Directory containing metadata CSV files")
+    ap.add_argument("--pattern", default="*.csv", help="Glob pattern for metadata files when using a directory")
+    ap.add_argument("--json-metadata-dir", default=None, help="Directory containing metadata JSON files")
+    ap.add_argument("--json-pattern", default="*.json", help="Glob pattern for JSON metadata files")
+    ap.add_argument("--out-parsed", default="metadata_parsed.csv")
+    ap.add_argument("--out-combined", default="metadata_combined.csv")
+    ap.add_argument("--cutoff", default="2024-02-01")
+    args = ap.parse_args()
+
+    cutoff = datetime.datetime.strptime(args.cutoff, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
+    if args.json_metadata_dir:
+        meta = load_metadata_json_dir(args.json_metadata_dir, args.json_pattern)
     else:
-        print("Column 'video_is_ai_gc' not found; skipping AI flag analysis.")
+        meta = load_metadata(args)
+    parsed = build_parsed_df(meta)
+
+    label_col = pick_label_column(meta)
+    parsed["manual_ai"] = meta[label_col].apply(normalize_manual_label) if label_col else None
+
+    combined = pd.concat([meta, parsed], axis=1)
+    combined = build_signal_columns(combined, cutoff)
+
+    parsed.to_csv(args.out_parsed, index=False)
+    combined.to_csv(args.out_combined, index=False)
+    print(f"Wrote: {args.out_parsed}")
+    print(f"Wrote: {args.out_combined}")
 
 
 if __name__ == "__main__":

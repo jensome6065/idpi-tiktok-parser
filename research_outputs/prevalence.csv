@@ -1,0 +1,5 @@
+signal,count_true,total,pct_true,ci95_low_pct,ci95_high_pct
+platform_raw_is_aigc,0,2865,0.0,0.0,0.13
+signal_platform,5,2865,0.17,0.07,0.41
+signal_creator_tag,0,2865,0.0,0.0,0.13
+disclosure_gap,0,2865,0.0,0.0,0.13
