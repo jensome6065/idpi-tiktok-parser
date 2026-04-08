@@ -1,0 +1,6 @@
+comparison,agreement_rate,n_non_null,agreement_rate_pct
+signals_platform_vs_creator,1.0,86,100.0
+signals_platform_vs_manual,0.4883720930232558,86,48.84
+signals_creator_vs_manual,0.4883720930232558,86,48.84
+signals_agree_all,,0,
+positive_agreement_platform_creator,,0,

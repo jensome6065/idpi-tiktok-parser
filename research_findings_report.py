@@ -14,6 +14,77 @@ def _as_bool(series: pd.Series) -> pd.Series:
     return series.fillna(False).astype(bool)
 
 
+def normalize_manual_label(x):
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return None
+    s = str(x).strip().upper()
+    if s in ("AI", "1", "TRUE"):
+        return 1
+    if s in ("NOT AI", "NOT_AI", "NON AI", "NON-AI", "NO", "0", "FALSE"):
+        return 0
+    return None
+
+
+def prepare_input_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Make report robust to multiple input schemas.
+    Supports:
+      1) fully enriched combined files
+      2) tiktok_database.csv-style (LINK + AI/NOT AI)
+      3) parser outputs with manual_ai but missing some report columns
+    """
+    out = df.copy()
+
+    if "AI/NOT AI" in out.columns and "signal_manual" not in out.columns:
+        out["signal_manual"] = out["AI/NOT AI"].apply(normalize_manual_label).astype("Int64")
+    elif "manual_ai" in out.columns and "signal_manual" not in out.columns:
+        out["signal_manual"] = out["manual_ai"].apply(normalize_manual_label).astype("Int64")
+    elif "signal_manual" not in out.columns:
+        out["signal_manual"] = pd.NA
+
+    if "signal_platform" not in out.columns:
+        if "is_aigc" in out.columns:
+            out["signal_platform"] = _as_bool(out["is_aigc"])
+        else:
+            out["signal_platform"] = False
+
+    if "signal_creator_tag" not in out.columns:
+        out["signal_creator_tag"] = False
+
+    if "disclosure_gap" not in out.columns:
+        out["disclosure_gap"] = _as_bool(out["signal_creator_tag"]) & ~_as_bool(out["signal_platform"])
+
+    if "signals_platform_vs_creator" not in out.columns:
+        out["signals_platform_vs_creator"] = _as_bool(out["signal_platform"]) == _as_bool(out["signal_creator_tag"])
+    if "signals_platform_vs_manual" not in out.columns:
+        out["signals_platform_vs_manual"] = out.apply(
+            lambda r: (bool(r["signal_platform"]) == bool(r["signal_manual"])) if pd.notna(r["signal_manual"]) else None,
+            axis=1,
+        )
+    if "signals_creator_vs_manual" not in out.columns:
+        out["signals_creator_vs_manual"] = out.apply(
+            lambda r: (bool(r["signal_creator_tag"]) == bool(r["signal_manual"])) if pd.notna(r["signal_manual"]) else None,
+            axis=1,
+        )
+    if "signals_agree_all" not in out.columns:
+        out["signals_agree_all"] = pd.NA
+
+    if "is_aigc" not in out.columns:
+        out["is_aigc"] = False
+
+    if "description" not in out.columns:
+        out["description"] = ""
+
+    if "era" not in out.columns:
+        out["era"] = "unknown"
+
+    for c in ["play_count", "like_count", "comment_count", "share_count", "engagement_total", "like_rate", "comment_rate"]:
+        if c not in out.columns:
+            out[c] = pd.NA
+
+    return out
+
+
 def wilson_ci(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
     if n == 0:
         return (0.0, 0.0)
@@ -289,6 +360,7 @@ def main() -> None:
     args = ap.parse_args()
 
     df = pd.read_csv(args.input, low_memory=False)
+    df = prepare_input_df(df)
     os.makedirs(args.outdir, exist_ok=True)
 
     tables = build_core_tables(df)

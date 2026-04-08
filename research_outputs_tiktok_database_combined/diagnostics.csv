@@ -1,0 +1,4 @@
+diagnostic,count,total,pct
+contains_ai_token,11,86,12.7907
+contains_model_names,10,86,11.6279
+contains_hashtag_ai,10,86,11.6279
