@@ -1,5 +1,13 @@
 """
 Metadata parser for random-sample TikTok dataset.
+
+Now includes all detection methods from tiktok_parser.py that can work
+on offline JSON (everything except DOM/browser-based badge detection):
+  - Deep recursive IsAigc extraction (with fallback walk)
+  - Strict + broad AI key-path search (find_ai_kv_pairs)
+  - AI string-value search (find_ai_string_values)
+  - Hashtag & caption AI analysis
+  - Broader potential-AI text matching
 """
 
 import argparse
@@ -7,9 +15,44 @@ import datetime
 import json
 import re
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+
+# ─────────────────────────────────────────────────────────────────
+# AI-flag detection config  (ported from tiktok_parser.py)
+# ─────────────────────────────────────────────────────────────────
+
+AI_KEY_PATTERNS_STRICT = [
+    r"\baigc\b",
+    r"\bis_aigc\b",
+    r"\bisaigc\b",
+    r"\bai[_-]?generated\b",
+    r"\bcontentcredentials\b",
+    r"\bcontent[_-]?credentials\b",
+    r"\bprovenance\b",
+]
+AI_KEY_PATTERNS_BROAD = AI_KEY_PATTERNS_STRICT + [
+    r"\bsynthetic\b",
+    r"\bwatermark\b",
+    r"\bcredential\b",
+    r"\bc2pa\b",
+    r"\bai[_-]?label\b",
+    r"\bcontent[_-]?label(s)?\b",
+    r"\bbadges?\b",
+    r"\blabels?\b",
+    r"\bsynthetic[_-]?media\b",
+]
+AI_KEY_REGEX_STRICT = re.compile("|".join(AI_KEY_PATTERNS_STRICT), re.IGNORECASE)
+AI_KEY_REGEX_BROAD  = re.compile("|".join(AI_KEY_PATTERNS_BROAD),  re.IGNORECASE)
+AI_VALUE_REGEX = re.compile(
+    r"(aigc|ai[-\s]?generated|synthetic|c2pa|content credentials|provenance|watermark)",
+    re.IGNORECASE,
+)
+
+# ─────────────────────────────────────────────────────────────────
+# Hashtag / caption AI detection config
+# ─────────────────────────────────────────────────────────────────
 
 AI_HASHTAGS: set = {
     "aigc", "aiart", "aigenerated", "aicreated", "aiartwork",
@@ -48,6 +91,107 @@ POTENTIAL_AI_TEXT_REGEX = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
+
+# ─────────────────────────────────────────────────────────────────
+# Recursive JSON AI-key / AI-value search  (from tiktok_parser.py)
+# ─────────────────────────────────────────────────────────────────
+
+def make_json_safe(x: Any) -> Any:
+    try:
+        json.dumps(x)
+        return x
+    except TypeError:
+        return str(x)
+
+
+def find_ai_kv_pairs(obj: Any, regex: re.Pattern, path: str = "") -> List[Tuple[str, Any]]:
+    """Recursively walk a JSON tree and return (path, value) for every key that matches *regex*."""
+    hits: List[Tuple[str, Any]] = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            k_str = str(k)
+            new_path = f"{path}.{k_str}" if path else k_str
+            if regex.search(k_str):
+                hits.append((new_path, v))
+            hits.extend(find_ai_kv_pairs(v, regex, new_path))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            hits.extend(find_ai_kv_pairs(v, regex, f"{path}[{i}]"))
+    return hits
+
+
+def find_ai_string_values(obj: Any, regex: re.Pattern, path: str = "") -> List[Tuple[str, str]]:
+    """Recursively walk a JSON tree and return (path, value) for every *string value* that matches *regex*."""
+    hits: List[Tuple[str, str]] = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            p = f"{path}.{k}" if path else str(k)
+            hits.extend(find_ai_string_values(v, regex, p))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            hits.extend(find_ai_string_values(v, regex, f"{path}[{i}]"))
+    elif isinstance(obj, str):
+        if regex.search(obj):
+            hits.append((path, obj))
+    return hits
+
+
+# ─────────────────────────────────────────────────────────────────
+# Deep IsAigc extraction  (from tiktok_parser.py)
+# ─────────────────────────────────────────────────────────────────
+
+def extract_is_aigc_value(data: Dict[str, Any]) -> Optional[bool]:
+    """Try multiple known JSON paths, then fall back to a recursive walk."""
+    # Direct known paths
+    def _safe_get(d: Any, *keys):
+        cur = d
+        for k in keys:
+            if isinstance(cur, dict) and k in cur:
+                cur = cur[k]
+            else:
+                return None
+        return cur
+
+    candidates = [
+        _safe_get(data, "itemInfo", "itemStruct", "IsAigc"),
+        _safe_get(data, "itemInfo", "itemStruct", "isAigc"),
+        _safe_get(data, "itemInfo", "itemStruct", "IsAIGC"),
+        _safe_get(data, "itemInfo", "itemStruct", "isAIGC"),
+        # DEFAULT_SCOPE paths (in case JSON was from a different shape)
+        _safe_get(data, "__DEFAULT_SCOPE__", "webapp.video-detail", "itemInfo", "itemStruct", "IsAigc"),
+        _safe_get(data, "__DEFAULT_SCOPE__", "webapp.video-detail", "itemInfo", "itemStruct", "isAigc"),
+    ]
+    for v in candidates:
+        b = coerce_bool(v)
+        if b is not None:
+            return b
+
+    # Fallback: recursive walk for any key named isaigc / is_aigc / aigc etc.
+    target_keys = {"isaigc", "is_aigc", "is-aigc", "isaigcflag", "isaigccontent", "aigc", "aigclabel"}
+
+    def walk(obj: Any) -> Optional[bool]:
+        if isinstance(obj, dict):
+            for k, vv in obj.items():
+                if str(k).strip().lower() in target_keys:
+                    b = coerce_bool(vv)
+                    if b is not None:
+                        return b
+                got = walk(vv)
+                if got is not None:
+                    return got
+        elif isinstance(obj, list):
+            for vv in obj:
+                got = walk(vv)
+                if got is not None:
+                    return got
+        return None
+
+    return walk(data)
+
+
+# ─────────────────────────────────────────────────────────────────
+# General helpers
+# ─────────────────────────────────────────────────────────────────
 
 def normalize_manual_label(x: Any) -> Optional[int]:
     if x is None:
@@ -161,15 +305,36 @@ def build_signal_columns(df: pd.DataFrame, cutoff: datetime.datetime) -> pd.Data
     out = df.copy()
 
     def _platform_signal(row: pd.Series) -> bool:
-        aigc = coerce_bool(row.get("is_aigc"))
-        badge = normalize_empty_text(row.get("aigc_badge_type")).lower()
+        aigc = coerce_bool(row.get("video_is_ai_gc")) or coerce_bool(row.get("is_aigc"))
+        
+        label_val = str(row.get("ai_gc_label_type", "")).strip().lower()
         desc = normalize_empty_text(row.get("ai_gc_description"))
+        # Also check if strict AI key search found anything meaningful
+        strict_keys = normalize_empty_text(row.get("ai_keys_strict"))
+        
         if aigc is True:
             return True
-        if badge not in ("", "none", "nan", "0", "0.0"):
+        if label_val in ("1", "2", "1.0", "2.0"):
             return True
         if desc:
             return True
+        # If recursive key search found strict AI keys beyond just the IsAigc=false entry
+        if strict_keys:
+            # Filter out paths that just point to IsAigc=false
+            meaningful = [k for k in strict_keys.split(";") if k and "AIGCDescription" not in k]
+            # Check if any of those strict keys have a truthy value
+            pairs_json = normalize_empty_text(row.get("ai_pairs_strict_json"))
+            if pairs_json and pairs_json != "[]":
+                try:
+                    pairs = json.loads(pairs_json)
+                    for pair in pairs:
+                        val = pair.get("value")
+                        if coerce_bool(val) is True:
+                            return True
+                        if isinstance(val, str) and val.strip() and val.strip().lower() not in ("", "false", "0", "none"):
+                            return True
+                except (json.JSONDecodeError, TypeError):
+                    pass
         return False
 
     out["signal_platform"] = out.apply(_platform_signal, axis=1)
@@ -272,6 +437,21 @@ def load_metadata_json_dir(metadata_dir: str, pattern: str) -> pd.DataFrame:
         stats_v2 = item.get("statsV2", {}) if isinstance(item.get("statsV2"), dict) else {}
         creator_ai_comment = item.get("creatorAIComment", {}) if isinstance(item.get("creatorAIComment"), dict) else {}
 
+        # ── Deep IsAigc extraction (recursive fallback) ──────────
+        is_aigc_val = extract_is_aigc_value(payload)
+
+        # ── Recursive AI key search (strict + broad) ─────────────
+        strict_hits  = find_ai_kv_pairs(payload, AI_KEY_REGEX_STRICT)
+        broad_hits   = find_ai_kv_pairs(payload, AI_KEY_REGEX_BROAD)
+        strict_keys  = sorted({p_path for (p_path, _) in strict_hits})
+        broad_keys   = sorted({p_path for (p_path, _) in broad_hits})
+        strict_pairs = [{"path": p_path, "value": make_json_safe(v)} for (p_path, v) in strict_hits][:200]
+        broad_pairs  = [{"path": p_path, "value": make_json_safe(v)} for (p_path, v) in broad_hits][:200]
+
+        # ── Recursive AI string-value search ──────────────────────
+        value_hits  = find_ai_string_values(payload, AI_VALUE_REGEX)
+        value_pairs = [{"path": p_path, "value": v} for (p_path, v) in value_hits][:200]
+
         rows.append(
             {
                 "video_id": item.get("id"),
@@ -282,10 +462,17 @@ def load_metadata_json_dir(metadata_dir: str, pattern: str) -> pd.DataFrame:
                 "stats_like_count": stats.get("diggCount", stats_v2.get("diggCount")),
                 "stats_comment_count": stats.get("commentCount", stats_v2.get("commentCount")),
                 "stats_share_count": stats.get("shareCount", stats_v2.get("shareCount")),
-                "video_is_ai_gc": item.get("IsAigc"),
-                "ai_gc_label_type": item.get("AIGCLabelType"),
-                "ai_gc_description": item.get("AIGCDescription"),
+                # Deep IsAigc (recursive)
+                "video_is_ai_gc": is_aigc_val,
+                "ai_gc_label_type": item.get("AIGCLabelType") or item.get("aigcLabelType"),
+                "ai_gc_description": item.get("AIGCDescription") or item.get("aigcDescription"),
                 "creator_ai_topic": creator_ai_comment.get("hasAITopic"),
+                # NEW: recursive AI key/value search results
+                "ai_keys_strict": ";".join(strict_keys),
+                "ai_keys_broad": ";".join(broad_keys),
+                "ai_pairs_strict_json": json.dumps(strict_pairs, ensure_ascii=False),
+                "ai_pairs_broad_json": json.dumps(broad_pairs, ensure_ascii=False),
+                "ai_value_hits_json": json.dumps(value_pairs, ensure_ascii=False),
                 "source_metadata_file": p.name,
             }
         )
