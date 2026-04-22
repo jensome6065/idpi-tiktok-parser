@@ -1,0 +1,17 @@
+file,section,description
+fig_01_platform_label_prevalence.png,Prevalence,"Compares `video_is_ai_gc`, `ai_gc_label_type`, and derived platform labels."
+fig_02_aigc_label_type_breakdown.png,Prevalence,Shows the distribution of raw `ai_gc_label_type` values.
+fig_03_cumulative_platform_labels_over_time.png,Time trend,Cumulative count of TikTok-labeled videos over time.
+fig_04_monthly_platform_labels.png,Time trend,Monthly counts of TikTok-labeled videos.
+fig_05_platform_label_share_by_era.png,Time trend,Share of platform-labeled videos in `pre_ai` vs `post_ai` eras.
+fig_06_views_by_era_boxplot.png,Engagement,View distribution before vs after the AI-boom cutoff.
+fig_07_like_rate_by_era_boxplot.png,Engagement,Like-rate distribution before vs after the AI-boom cutoff.
+fig_08_views_by_platform_label_boxplot.png,Engagement,Views for TikTok-labeled vs non-labeled videos.
+fig_09_like_rate_by_platform_label_boxplot.png,Engagement,Like rates for TikTok-labeled vs non-labeled videos.
+fig_10_manual_vs_platform_labels.png,Accuracy / audit,Manual labels crossed with TikTok platform labels in the 86-video audit set.
+fig_11_manual_views_boxplot.png,Accuracy / audit,Views for manually labeled AI vs manually labeled non-AI videos.
+fig_12_manual_like_rate_boxplot.png,Accuracy / audit,Like rates for manually labeled AI vs manually labeled non-AI videos.
+fig_13_labeled_vs_not_labeled.png,Prevalence,Direct comparison of TikTok-labeled vs not-labeled counts/percentages.
+fig_14_monthly_label_rate_pct.png,Time trend,Monthly percentage labeled (normalizes by monthly sample size).
+fig_15_summary_stats_views_by_era.png,Engagement,Median/IQR/max view summary for pre_ai vs post_ai groups.
+fig_16_summary_stats_views_by_platform.png,Engagement,Median/IQR/max view summary for platform-labeled vs non-labeled groups.
