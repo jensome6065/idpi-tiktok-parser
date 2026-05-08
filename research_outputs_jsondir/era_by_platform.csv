@@ -1,3 +1,4 @@
 era,signal_platform,count,pct_within_era
-post_ai,False,5884,100.0
+post_ai,False,5816,98.84
+post_ai,True,68,1.16
 pre_ai,False,4316,100.0
