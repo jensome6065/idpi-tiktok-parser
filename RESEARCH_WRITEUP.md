@@ -1,5 +1,7 @@
 # Measuring and Evaluating AI-Generated Content (AIGC) on TikTok: A Multi-Signal Detection Study
 
+> New to this repository? Start with the onboarding guide in `README.md` for environment setup, end-to-end commands, script map, and reproducibility workflow.
+
 ## 1. Introduction
 
 The rapid proliferation of AI-generated content (AIGC) across social media platforms raises critical questions about transparency, disclosure, and content authenticity. As generative AI tools such as Sora, Runway, Kling, Midjourney, and others become increasingly accessible, it is essential to understand how platforms like TikTok label such content and whether creators voluntarily disclose AI involvement.
