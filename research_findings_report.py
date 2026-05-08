@@ -85,6 +85,66 @@ def prepare_input_df(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def build_hashtag_extension_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    """
+    Descriptive hashtag fields from parser output: coverage, top terms, and
+    simple alignment of `hashtag_ai_signal` with platform / manual labels.
+    """
+    out: Dict[str, pd.DataFrame] = {}
+    if "hashtags" not in df.columns:
+        return out
+    total = len(df)
+    tags_series = df["hashtags"].fillna("").astype(str)
+    nonempty = tags_series.str.strip().str.len() > 0
+    n_with = int(nonempty.sum())
+    out["hashtag_coverage"] = pd.DataFrame(
+        [
+            {
+                "videos_with_any_hashtag": n_with,
+                "total": total,
+                "pct": round(100.0 * n_with / total, 2) if total else 0.0,
+            }
+        ]
+    )
+    exploded = tags_series.loc[nonempty].str.split(";").explode().str.strip()
+    exploded = exploded[exploded.str.len() > 0]
+    if len(exploded):
+        vc = exploded.str.lower().value_counts().reset_index()
+        vc.columns = ["hashtag", "count"]
+        out["hashtag_top_terms"] = vc.head(40)
+    if "hashtag_ai_signal" not in df.columns:
+        return out
+    ht = _as_bool(df["hashtag_ai_signal"])
+    out["hashtag_ai_prevalence"] = pd.DataFrame(
+        [
+            {
+                "signal": "hashtag_ai_signal",
+                "count_true": int(ht.sum()),
+                "total": total,
+                "pct_true": round(100.0 * int(ht.sum()) / total, 2) if total else 0.0,
+            }
+        ]
+    )
+    plat = _as_bool(df["signal_platform"])
+    out["hashtag_ai_by_platform"] = (
+        pd.crosstab(plat.rename("signal_platform"), ht.rename("hashtag_ai_signal"), margins=True)
+        .reset_index()
+    )
+    if "signal_manual" in df.columns:
+        sm = df["signal_manual"]
+        valid = sm.notna()
+        if bool(valid.any()):
+            out["hashtag_ai_by_manual"] = (
+                pd.crosstab(
+                    sm.loc[valid].rename("signal_manual"),
+                    _as_bool(df.loc[valid, "hashtag_ai_signal"]).rename("hashtag_ai_signal"),
+                    margins=True,
+                )
+                .reset_index()
+            )
+    return out
+
+
 def wilson_ci(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
     if n == 0:
         return (0.0, 0.0)
@@ -213,7 +273,7 @@ def build_core_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         diag_rows.append({"diagnostic": name, "count": n, "total": total, "pct": round(100.0 * n / total, 4) if total else 0.0})
     diagnostics = pd.DataFrame(diag_rows)
 
-    return {
+    tables: Dict[str, pd.DataFrame] = {
         "prevalence": prevalence,
         "agreement": agreement,
         "engagement_by_platform": engagement_by_platform,
@@ -223,6 +283,8 @@ def build_core_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         "era_by_platform": era_by_platform,
         "diagnostics": diagnostics,
     }
+    tables.update(build_hashtag_extension_tables(df))
+    return tables
 
 
 def save_figures(tables: Dict[str, pd.DataFrame], out_dir: str) -> None:
@@ -331,6 +393,34 @@ def write_findings_markdown(df: pd.DataFrame, tables: Dict[str, pd.DataFrame], o
                 f"- Captions with AI-themed hashtags: **{int(diag.loc['contains_hashtag_ai', 'count'])}** "
                 f"({diag.loc['contains_hashtag_ai', 'pct']:.4f}%).\n\n"
             )
+        if "hashtag_coverage" in tables:
+            hc = tables["hashtag_coverage"].iloc[0]
+            f.write("## Caption hashtag metadata (descriptive)\n\n")
+            f.write(
+                f"- Videos with at least one extracted hashtag (`hashtags`): **{int(hc['videos_with_any_hashtag'])}** "
+                f"/ {int(hc['total'])} ({hc['pct']:.2f}%).\n"
+            )
+            if "hashtag_ai_prevalence" in tables:
+                hap = tables["hashtag_ai_prevalence"].iloc[0]
+                f.write(
+                    f"- Videos matching the curated AI hashtag lexicon (`hashtag_ai_signal`): **{int(hap['count_true'])}** "
+                    f"({hap['pct_true']:.2f}%).\n"
+                )
+            if "hashtag_top_terms" in tables and len(tables["hashtag_top_terms"]):
+                bits = []
+                for row in tables["hashtag_top_terms"].head(8).itertuples(index=False):
+                    bits.append(f"`{row.hashtag}` (n={int(row.count)})")
+                f.write(f"- Most frequent hashtags (case-insensitive, top 8): {', '.join(bits)}.\n")
+            extras = []
+            if "hashtag_ai_by_platform" in tables:
+                extras.append("`hashtag_ai_by_platform.csv`")
+            if "hashtag_ai_by_manual" in tables:
+                extras.append("`hashtag_ai_by_manual.csv`")
+            if "hashtag_top_terms" in tables:
+                extras.append("`hashtag_top_terms.csv`")
+            if extras:
+                f.write(f"- Saved tables: {', '.join(extras)}.\n")
+            f.write("\n")
         f.write("## Engagement Snapshot (Descriptive)\n\n")
         n_pos = int(platform_counts.get(True, 0))
         n_neg = int(platform_counts.get(False, 0))
@@ -351,6 +441,14 @@ def write_findings_markdown(df: pd.DataFrame, tables: Dict[str, pd.DataFrame], o
         f.write("- Engagement differences are descriptive and should be interpreted with distribution-aware tests.\n")
         if prev.loc["platform_raw_is_aigc", "pct_true"] in (0.0, 100.0):
             f.write("- Raw platform AI flag appears degenerate (all/none), so pair this with your independent visual model before strong inference.\n")
+        f.write("\n## Future research\n\n")
+        f.write(
+            "- Characterize the **full** hashtag and caption metadata distribution (frequencies, co-occurrence, drift over time) and relate it to "
+            "`ai_gc_label_type`, manual labels, and external visual taxonomies (for example SightEngine categories once joined at row level).\n"
+        )
+        f.write(
+            "- Extend beyond the fixed AI hashtag lexicon to data-driven tagging or embedding clusters, then test agreement with platform and human labels.\n"
+        )
 
 
 def main() -> None:

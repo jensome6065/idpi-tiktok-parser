@@ -9,6 +9,7 @@ import pandas as pd
 
 ROOT = "/Users/jenn/Documents/umass/ersp/idpi-tiktok-parser"
 OUTDIR = os.path.join(ROOT, "paper_figures")
+POSTER_OUTDIR = os.path.join(OUTDIR, "poster_ready")
 
 
 def _to_bool(series: pd.Series) -> pd.Series:
@@ -49,6 +50,19 @@ def _boxplot_two_groups(series_a: pd.Series, series_b: pd.Series, labels: list[s
     plt.close()
 
 
+def _apply_poster_style() -> None:
+    plt.rcParams.update(
+        {
+            "figure.titlesize": 20,
+            "axes.titlesize": 17,
+            "axes.labelsize": 15,
+            "xtick.labelsize": 13,
+            "ytick.labelsize": 13,
+            "legend.fontsize": 12,
+        }
+    )
+
+
 def make_prevalence_figure(df: pd.DataFrame) -> None:
     rows = [
         ("`video_is_ai_gc` true", _to_bool(df["video_is_ai_gc"]).sum()),
@@ -72,31 +86,48 @@ def make_prevalence_figure(df: pd.DataFrame) -> None:
 
 
 def make_label_type_breakdown_figure(df: pd.DataFrame) -> None:
-    counts = (
-        df["ai_gc_label_type"]
-        .fillna("missing")
-        .astype(str)
-        .value_counts()
-        .rename_axis("label_type")
-        .reset_index(name="count")
-    )
-    counts["label"] = counts["label_type"].replace({
-        "0.0": "0",
-        "1.0": "1",
-        "2.0": "2",
-        "missing": "Missing",
-    })
+    raw = df["ai_gc_label_type"]
+    n_total = len(raw)
+    n_present = int(raw.notna().sum())
+    n_missing = n_total - n_present
 
-    plt.figure(figsize=(7.5, 4.5))
-    bars = plt.bar(counts["label"], counts["count"], color="#2563eb")
-    plt.title("Distribution of TikTok `ai_gc_label_type` Values")
-    plt.ylabel("Number of videos")
-    plt.xlabel("`ai_gc_label_type`")
-    for bar, count in zip(bars, counts["count"]):
-        plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{int(count)}",
-                 ha="center", va="bottom", fontsize=9)
-    plt.tight_layout()
-    plt.savefig(os.path.join(OUTDIR, "fig_02_aigc_label_type_breakdown.png"), dpi=220)
+    present_counts = (
+        raw.dropna()
+        .astype(str)
+        .replace({"0.0": "0", "1.0": "1", "2.0": "2"})
+        .value_counts()
+        .reindex(["0", "1", "2"], fill_value=0)
+    )
+    present_pct = 100.0 * present_counts / max(n_present, 1)
+
+    fig, axes = plt.subplots(1, 2, figsize=(10.2, 4.5))
+
+    # Left panel: coverage of the raw field
+    left_labels = ["Missing", "Present"]
+    left_vals = [100.0 * n_missing / n_total, 100.0 * n_present / n_total]
+    bars = axes[0].bar(left_labels, left_vals, color=["#94a3b8", "#2563eb"])
+    axes[0].set_ylabel("Percent of all videos")
+    axes[0].set_title("Field Coverage")
+    for bar, c, p in zip(bars, [n_missing, n_present], left_vals):
+        axes[0].text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{c}\n({p:.2f}%)",
+                     ha="center", va="bottom", fontsize=9)
+
+    # Right panel: value mix among present rows only
+    bars2 = axes[1].bar(present_counts.index, present_pct.values, color="#2563eb")
+    axes[1].set_title(f"Value Mix Among Present Rows (n={n_present})")
+    axes[1].set_ylabel("Percent within present rows")
+    axes[1].set_xlabel("`ai_gc_label_type`")
+    for bar, c, p in zip(bars2, present_counts.values, present_pct.values):
+        axes[1].text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{int(c)}\n({p:.1f}%)",
+                     ha="center", va="bottom", fontsize=9)
+
+    fig.suptitle("TikTok `ai_gc_label_type` Overview", y=0.995, fontsize=14)
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.savefig(
+        os.path.join(OUTDIR, "fig_02_aigc_label_type_breakdown.png"),
+        dpi=220,
+        bbox_inches="tight",
+    )
     plt.close()
 
 
@@ -161,7 +192,9 @@ def make_monthly_label_rate_figure(df: pd.DataFrame) -> None:
     plot_df = df.copy()
     plot_df["create_dt"] = pd.to_datetime(plot_df["create_dt"], errors="coerce", utc=True)
     plot_df = plot_df.dropna(subset=["create_dt"])
-    plot_df["month"] = plot_df["create_dt"].dt.to_period("M").dt.to_timestamp()
+    # Remove obvious timestamp artifacts (e.g., epoch default 1970 rows).
+    plot_df = plot_df[(plot_df["create_dt"].dt.year >= 2018) & (plot_df["create_dt"].dt.year <= 2030)]
+    plot_df["month"] = plot_df["create_dt"].dt.tz_convert(None).dt.to_period("M").dt.to_timestamp()
     plot_df["platform_labeled"] = _platform_labeled_from_badge(plot_df)
     monthly = (
         plot_df.groupby("month")
@@ -170,14 +203,64 @@ def make_monthly_label_rate_figure(df: pd.DataFrame) -> None:
     )
     monthly["label_rate_pct"] = 100.0 * monthly["labeled"] / monthly["total"]
 
-    plt.figure(figsize=(9, 4.8))
-    plt.plot(monthly["month"], monthly["label_rate_pct"], marker="o", linewidth=1.8, color="#2563eb")
-    plt.axvline(pd.Timestamp("2024-02-01"), color="#dc2626", linestyle="--", linewidth=1.5)
-    plt.ylabel("Platform-label rate (%) within monthly sample")
-    plt.title("Monthly TikTok AI-Label Rate (Sample-Normalized)")
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(9.4, 6.2), sharex=True, gridspec_kw={"height_ratios": [3, 1]}
+    )
+    ax1.plot(monthly["month"], monthly["label_rate_pct"], marker="o", linewidth=1.8, color="#2563eb")
+    ax1.axvline(pd.Timestamp("2024-02-01"), color="#dc2626", linestyle="--", linewidth=1.3)
+    ax1.set_ylabel("Label rate (%)")
+    ax1.set_title("Monthly TikTok AI-Label Rate (Sample-Normalized)")
+
+    ax2.bar(monthly["month"], monthly["total"], width=25, color="#94a3b8")
+    ax2.set_ylabel("n / month")
+    ax2.set_xlabel("Month")
+    ax2.set_title("Monthly Sample Size (context for rate volatility)", fontsize=10)
+
     plt.tight_layout()
     plt.savefig(os.path.join(OUTDIR, "fig_14_monthly_label_rate_pct.png"), dpi=220)
     plt.close()
+
+
+def make_monthly_label_rate_figure_poster(df: pd.DataFrame) -> None:
+    _apply_poster_style()
+    plot_df = df.copy()
+    plot_df["create_dt"] = pd.to_datetime(plot_df["create_dt"], errors="coerce", utc=True)
+    plot_df = plot_df.dropna(subset=["create_dt"])
+    plot_df = plot_df[(plot_df["create_dt"].dt.year >= 2018) & (plot_df["create_dt"].dt.year <= 2030)]
+    plot_df["month"] = plot_df["create_dt"].dt.tz_convert(None).dt.to_period("M").dt.to_timestamp()
+    plot_df["platform_labeled"] = _platform_labeled_from_badge(plot_df)
+    monthly = (
+        plot_df.groupby("month")
+        .agg(total=("platform_labeled", "size"), labeled=("platform_labeled", "sum"))
+        .reset_index()
+    )
+    monthly["label_rate_pct"] = 100.0 * monthly["labeled"] / monthly["total"]
+
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(11.2, 7.2), sharex=True, gridspec_kw={"height_ratios": [3, 1]}
+    )
+    ax1.plot(monthly["month"], monthly["label_rate_pct"], marker="o", linewidth=2.6, color="#1d4ed8")
+    ax1.axvline(pd.Timestamp("2024-02-01"), color="#b91c1c", linestyle="--", linewidth=2.0)
+    ax1.text(
+        pd.Timestamp("2024-02-01"),
+        max(monthly["label_rate_pct"].max() * 0.85, 0.5),
+        "Analysis cutoff",
+        color="#b91c1c",
+        rotation=90,
+        va="center",
+        ha="right",
+        fontsize=12,
+    )
+    ax1.set_ylabel("Label rate (%)")
+    ax1.set_title("Monthly TikTok AI-Label Rate (Sample-Normalized)")
+
+    ax2.bar(monthly["month"], monthly["total"], width=25, color="#94a3b8")
+    ax2.set_ylabel("n / month")
+    ax2.set_xlabel("Month")
+    ax2.set_title("Monthly Sample Size", fontsize=13)
+    fig.tight_layout()
+    fig.savefig(os.path.join(POSTER_OUTDIR, "fig_14_monthly_label_rate_pct_poster.png"), dpi=260, bbox_inches="tight")
+    plt.close(fig)
 
 
 def make_summary_stats_figures(df: pd.DataFrame) -> None:
@@ -205,26 +288,66 @@ def make_summary_stats_figures(df: pd.DataFrame) -> None:
     plt.savefig(os.path.join(OUTDIR, "fig_15_summary_stats_views_by_era.png"), dpi=220)
     plt.close()
 
-    plat_stats = (
-        plot_df.groupby("platform_labeled")["play_count"]
-        .agg(n="count", median="median", q1=lambda s: s.quantile(0.25), q3=lambda s: s.quantile(0.75), max="max")
-        .reindex([False, True])
-        .reset_index()
+    unlabeled = plot_df.loc[~plot_df["platform_labeled"], "play_count"].dropna()
+    labeled = plot_df.loc[plot_df["platform_labeled"], "play_count"].dropna()
+
+    plt.figure(figsize=(8.2, 5.1))
+    box = plt.boxplot(
+        [((unlabeled + 1).map(math.log10)), ((labeled + 1).map(math.log10))],
+        tick_labels=["Not labeled", "TikTok labeled AI"],
+        patch_artist=True,
     )
-    x = range(len(plat_stats))
-    yerr_low = plat_stats["median"] - plat_stats["q1"]
-    yerr_high = plat_stats["q3"] - plat_stats["median"]
-    plt.figure(figsize=(7.8, 4.8))
-    plt.bar(x, plat_stats["median"], color=["#94a3b8", "#2563eb"])
-    plt.errorbar(x, plat_stats["median"], yerr=[yerr_low, yerr_high], fmt="none", ecolor="#1f2937", capsize=5)
-    plt.xticks(list(x), ["Not labeled", "TikTok labeled AI"])
-    plt.ylabel("Median views (IQR whiskers)")
-    plt.title("Summary Stats: Views by Platform Label")
-    for i, row in plat_stats.iterrows():
-        plt.text(i, row["median"], f"n={int(row['n'])}\nmax={int(row['max'])}", ha="center", va="bottom", fontsize=8)
+    for patch, color in zip(box["boxes"], ["#94a3b8", "#2563eb"]):
+        patch.set_facecolor(color)
+    plt.ylabel("log10(view_count + 1)")
+    plt.title("Views by Platform Label (Log Scale)")
+
+    u_med, u_q1, u_q3 = float(unlabeled.median()), float(unlabeled.quantile(0.25)), float(unlabeled.quantile(0.75))
+    l_med, l_q1, l_q3 = float(labeled.median()), float(labeled.quantile(0.25)), float(labeled.quantile(0.75))
+    plt.text(
+        0.02, 0.97,
+        f"Not labeled: n={len(unlabeled):,}, median={u_med:,.1f}, IQR={u_q1:,.1f}-{u_q3:,.1f}\n"
+        f"TikTok labeled AI: n={len(labeled):,}, median={l_med:,.1f}, IQR={l_q1:,.1f}-{l_q3:,.1f}",
+        transform=plt.gca().transAxes, ha="left", va="top", fontsize=8.8,
+        bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "alpha": 0.85, "edgecolor": "#d1d5db"},
+    )
     plt.tight_layout()
     plt.savefig(os.path.join(OUTDIR, "fig_16_summary_stats_views_by_platform.png"), dpi=220)
     plt.close()
+
+
+def make_summary_stats_platform_poster(df: pd.DataFrame) -> None:
+    _apply_poster_style()
+    plot_df = _clean_plot_df(df)
+    plot_df["platform_labeled"] = _platform_labeled_from_badge(plot_df)
+    unlabeled = plot_df.loc[~plot_df["platform_labeled"], "play_count"].dropna()
+    labeled = plot_df.loc[plot_df["platform_labeled"], "play_count"].dropna()
+
+    fig = plt.figure(figsize=(11.2, 6.8))
+    ax = fig.add_subplot(111)
+    box = ax.boxplot(
+        [((unlabeled + 1).map(math.log10)), ((labeled + 1).map(math.log10))],
+        tick_labels=["Not labeled", "Platform-labeled AI"],
+        patch_artist=True,
+        widths=0.45,
+    )
+    for patch, color in zip(box["boxes"], ["#94a3b8", "#1d4ed8"]):
+        patch.set_facecolor(color)
+    ax.set_ylabel("log10(view_count + 1)")
+    ax.set_title("Views by Platform Label (Log Scale)")
+
+    u_med, u_q1, u_q3 = float(unlabeled.median()), float(unlabeled.quantile(0.25)), float(unlabeled.quantile(0.75))
+    l_med, l_q1, l_q3 = float(labeled.median()), float(labeled.quantile(0.25)), float(labeled.quantile(0.75))
+    ax.text(
+        0.02, 0.98,
+        f"Not labeled: n={len(unlabeled):,}, median={u_med:,.1f}, IQR={u_q1:,.1f}-{u_q3:,.1f}\n"
+        f"Platform-labeled AI: n={len(labeled):,}, median={l_med:,.1f}, IQR={l_q1:,.1f}-{l_q3:,.1f}",
+        transform=ax.transAxes, ha="left", va="top", fontsize=12.5,
+        bbox={"boxstyle": "round,pad=0.35", "facecolor": "white", "alpha": 0.9, "edgecolor": "#cbd5e1"},
+    )
+    fig.tight_layout()
+    fig.savefig(os.path.join(POSTER_OUTDIR, "fig_16_summary_stats_views_by_platform_poster.png"), dpi=260, bbox_inches="tight")
+    plt.close(fig)
 
 
 def make_platform_by_era_figure(df: pd.DataFrame) -> None:
@@ -381,6 +504,7 @@ def write_manifest(metadata: pd.DataFrame, manual: pd.DataFrame) -> None:
 
 def main() -> None:
     os.makedirs(OUTDIR, exist_ok=True)
+    os.makedirs(POSTER_OUTDIR, exist_ok=True)
 
     metadata = pd.read_csv(os.path.join(ROOT, "metadata_combined.jsondir.csv"), low_memory=False)
     manual = pd.read_csv(os.path.join(ROOT, "tiktok_database_combined.csv"), low_memory=False)
@@ -397,6 +521,8 @@ def main() -> None:
     make_labeled_vs_not_figure(metadata)
     make_monthly_label_rate_figure(metadata)
     make_summary_stats_figures(metadata)
+    make_monthly_label_rate_figure_poster(metadata)
+    make_summary_stats_platform_poster(metadata)
     write_manifest(metadata, manual)
 
     print(f"Wrote figures to {OUTDIR}")
